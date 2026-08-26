@@ -447,7 +447,8 @@ async def handle_promote(request: Request):
     if not valid_policy:
         return JSONResponse(status_code=400, content={"error": "INVALID_INPUT"})
 
-    current_champion_version = ALIAS_STORE.get("champion", champion_version_in)
+    # Always respect championVersion provided in the request payload if available
+    current_champion_version = champion_version_in if champion_version_in else ALIAS_STORE.get("champion", "")
 
     seen_version_ids: Set[str] = set()
     failed_gates: Dict[str, List[str]] = {}
@@ -509,11 +510,11 @@ async def handle_promote(request: Request):
                     v_codes.add("METRIC_RANGE")
 
             if is_finite_number(acc) and 0.0 <= acc <= 1.0:
-                if acc < accuracy_floor:
+                if round_12(acc) < round_12(accuracy_floor):
                     v_codes.add("ACCURACY_FLOOR")
 
             if is_finite_number(lat) and lat >= 0:
-                if lat > max_latency_ms:
+                if round_12(lat) > round_12(max_latency_ms):
                     v_codes.add("LATENCY_LIMIT")
 
             if is_non_negative_safe_int(sz):
@@ -533,7 +534,7 @@ async def handle_promote(request: Request):
                             v_codes.add("NON_FINITE")
                         elif not (0.0 <= s_val <= 1.0):
                             v_codes.add(f"SLICE_RANGE:{req_name}")
-                        elif s_val < req_floor:
+                        elif round_12(s_val) < round_12(req_floor):
                             v_codes.add(f"SLICE_FLOOR:{req_name}")
 
         sorted_v_codes = sorted(list(v_codes), key=lambda x: x.encode("utf-8"))
@@ -543,9 +544,8 @@ async def handle_promote(request: Request):
             valid_version_objects.append(v_item)
 
     eligible_versions = [str(v["version"]) for v in valid_version_objects]
-    eligible_versions.sort(key=lambda x: x.encode("utf-8"))
+    eligible_versions.sort(key=lambda x: int(x))
 
-    # If no versions passed evaluation gates, block promotion
     if not valid_version_objects:
         return JSONResponse(status_code=200, content={
             "action": "block",
@@ -560,10 +560,10 @@ async def handle_promote(request: Request):
     def rank_key(v):
         e = v["evaluation"]
         return (
-            -e["accuracy"],
-            e["latencyMs"],
+            -round_12(e["accuracy"]),
+            round_12(e["latencyMs"]),
             e["sizeBytes"],
-            int(v["version"])
+            -int(v["version"])  # Standard higher-version tie-breaking for equal performance
         )
 
     ranked_eligible = sorted(valid_version_objects, key=rank_key)
@@ -572,7 +572,6 @@ async def handle_promote(request: Request):
 
     champion_item = next((v for v in valid_version_objects if str(v["version"]) == current_champion_version), None)
 
-    # If the current champion version is not present in the payload array, select the best eligible candidate
     if champion_item is None:
         ALIAS_STORE["champion"] = best_challenger_version
         return JSONResponse(status_code=200, content={
@@ -588,11 +587,11 @@ async def handle_promote(request: Request):
             "evidence": best_challenger["evaluation"]
         })
 
-    champion_acc = champion_item["evaluation"]["accuracy"]
-    challenger_acc = best_challenger["evaluation"]["accuracy"]
+    champion_acc = round_12(champion_item["evaluation"]["accuracy"])
+    challenger_acc = round_12(best_challenger["evaluation"]["accuracy"])
     acc_diff = round_12(challenger_acc - champion_acc)
 
-    if best_challenger_version != current_champion_version and acc_diff >= min_improvement:
+    if best_challenger_version != current_champion_version and acc_diff >= round_12(min_improvement):
         ALIAS_STORE["champion"] = best_challenger_version
         return JSONResponse(status_code=200, content={
             "action": "promote",
