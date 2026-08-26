@@ -545,9 +545,8 @@ async def handle_promote(request: Request):
     eligible_versions = [str(v["version"]) for v in valid_version_objects]
     eligible_versions.sort(key=lambda x: x.encode("utf-8"))
 
-    champion_item = next((v for v in valid_version_objects if str(v["version"]) == current_champion_version), None)
-
-    if champion_item is None:
+    # If no versions passed evaluation gates, block promotion
+    if not valid_version_objects:
         return JSONResponse(status_code=200, content={
             "action": "block",
             "championVersion": current_champion_version,
@@ -569,25 +568,41 @@ async def handle_promote(request: Request):
 
     ranked_eligible = sorted(valid_version_objects, key=rank_key)
     best_challenger = ranked_eligible[0]
+    best_challenger_version = str(best_challenger["version"])
 
-    champion_acc = champion_item["evaluation"]["accuracy"]
-    challenger_acc = best_challenger["evaluation"]["accuracy"]
+    champion_item = next((v for v in valid_version_objects if str(v["version"]) == current_champion_version), None)
 
-    acc_diff = round_12(challenger_acc - champion_acc)
-
-    if str(best_challenger["version"]) != current_champion_version and acc_diff >= min_improvement:
-        new_champion_version = str(best_challenger["version"])
-        ALIAS_STORE["champion"] = new_champion_version
-
+    # If the current champion version is not present in the payload array, select the best eligible candidate
+    if champion_item is None:
+        ALIAS_STORE["champion"] = best_challenger_version
         return JSONResponse(status_code=200, content={
             "action": "promote",
             "championVersion": current_champion_version,
-            "selectedVersion": new_champion_version,
+            "selectedVersion": best_challenger_version,
             "eligibleVersions": eligible_versions,
             "failedGates": failed_gates,
             "aliasMutation": {
                 "alias": "champion",
-                "version": new_champion_version
+                "version": best_challenger_version
+            },
+            "evidence": best_challenger["evaluation"]
+        })
+
+    champion_acc = champion_item["evaluation"]["accuracy"]
+    challenger_acc = best_challenger["evaluation"]["accuracy"]
+    acc_diff = round_12(challenger_acc - champion_acc)
+
+    if best_challenger_version != current_champion_version and acc_diff >= min_improvement:
+        ALIAS_STORE["champion"] = best_challenger_version
+        return JSONResponse(status_code=200, content={
+            "action": "promote",
+            "championVersion": current_champion_version,
+            "selectedVersion": best_challenger_version,
+            "eligibleVersions": eligible_versions,
+            "failedGates": failed_gates,
+            "aliasMutation": {
+                "alias": "champion",
+                "version": best_challenger_version
             },
             "evidence": best_challenger["evaluation"]
         })
