@@ -10,7 +10,6 @@ from fastapi.responses import JSONResponse
 
 app = FastAPI()
 
-# Stateful in-memory storage for persistent runs and aliases
 RUN_STORE: Dict[str, Dict[str, Any]] = {}
 RUN_INPUT_STORE: Dict[str, Dict[str, Any]] = {}
 ALIAS_STORE: Dict[str, str] = {}
@@ -18,7 +17,6 @@ ALIAS_STORE: Dict[str, str] = {}
 ISO_8601_REGEX = re.compile(
     r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d{1,3})?(Z|[+-]\d{2}:\d{2})$"
 )
-
 CANONICAL_VERSION_REGEX = re.compile(r"^(0|[1-9]\d*)$")
 
 
@@ -58,10 +56,6 @@ def is_canonical_version_str(val: Any) -> bool:
 def is_finite_number(val: Any) -> bool:
     return isinstance(val, (int, float)) and not isinstance(val, bool) and math.isfinite(val)
 
-
-# ==========================================
-# ENDPOINT 1: POST /bqml
-# ==========================================
 
 @app.post("/bqml")
 async def handle_bqml(request: Request):
@@ -381,7 +375,6 @@ def process_evaluate_phase(body: Dict[str, Any]) -> JSONResponse:
         critical_slice_pass = False
 
     decision = "admit" if len(reason_codes) == 0 else "reject"
-
     sorted_reasons = sorted(list(reason_codes), key=lambda x: x.encode("utf-8"))
 
     return JSONResponse(status_code=200, content={
@@ -396,10 +389,6 @@ def process_evaluate_phase(body: Dict[str, Any]) -> JSONResponse:
     })
 
 
-# ==========================================
-# ENDPOINT 2: POST /promote
-# ==========================================
-
 @app.post("/promote")
 async def handle_promote(request: Request):
     try:
@@ -411,11 +400,12 @@ async def handle_promote(request: Request):
         return JSONResponse(status_code=400, content={"error": "INVALID_INPUT"})
 
     as_of_str = body.get("asOf")
-    champion_version_in = body.get("championVersion")
+    champion_version_raw = body.get("championVersion")
+    champion_version_in = str(champion_version_raw) if champion_version_raw is not None else ""
     policy = body.get("policy")
     versions_list = body.get("versions")
 
-    if not isinstance(as_of_str, str) or not isinstance(champion_version_in, str) or not isinstance(policy, dict) or not isinstance(versions_list, list):
+    if not isinstance(as_of_str, str) or policy is None or not isinstance(policy, dict) or not isinstance(versions_list, list):
         return JSONResponse(status_code=400, content={"error": "INVALID_INPUT"})
 
     as_of_ts = parse_iso8601_utc(as_of_str)
@@ -426,15 +416,15 @@ async def handle_promote(request: Request):
     schema_digest = policy.get("schemaDigest")
     max_age_seconds = policy.get("maxAgeSeconds")
     accuracy_floor = policy.get("accuracyFloor")
-    required_slices = policy.get("requiredSlices")
+    required_slices = policy.get("requiredSlices", {})
     max_latency_ms = policy.get("maxLatencyMs")
     max_size_bytes = policy.get("maxSizeBytes")
-    min_improvement = policy.get("minImprovement")
+    min_improvement = policy.get("minImprovement", 0.0)
 
     valid_policy = True
-    if not isinstance(dataset_digest, str) or len(dataset_digest) == 0:
+    if not isinstance(dataset_digest, str) or not dataset_digest:
         valid_policy = False
-    if not isinstance(schema_digest, str) or len(schema_digest) == 0:
+    if not isinstance(schema_digest, str) or not schema_digest:
         valid_policy = False
     if not is_non_negative_safe_int(max_age_seconds):
         valid_policy = False
@@ -451,7 +441,7 @@ async def handle_promote(request: Request):
         valid_policy = False
     if not is_non_negative_safe_int(max_size_bytes):
         valid_policy = False
-    if not is_finite_number(min_improvement) or not (0.0 <= min_improvement <= 1.0):
+    if not is_finite_number(min_improvement):
         valid_policy = False
 
     if not valid_policy:
@@ -467,17 +457,17 @@ async def handle_promote(request: Request):
         if not isinstance(v_item, dict):
             return JSONResponse(status_code=400, content={"error": "INVALID_INPUT"})
 
-        v_id = v_item.get("version")
+        v_id_raw = v_item.get("version")
+        v_id = str(v_id_raw) if v_id_raw is not None else ""
         v_codes: Set[str] = set()
 
-        if not is_canonical_version_str(v_id):
+        if not v_id or not is_canonical_version_str(v_id):
             v_codes.add("INVALID_VERSION")
 
-        if isinstance(v_id, str) and v_id in seen_version_ids:
+        if v_id in seen_version_ids:
             v_codes.add("DUPLICATE_VERSION")
 
-        if isinstance(v_id, str):
-            seen_version_ids.add(v_id)
+        seen_version_ids.add(v_id)
 
         artifact_digest = v_item.get("artifactDigest")
         if not isinstance(artifact_digest, str):
@@ -515,14 +505,8 @@ async def handle_promote(request: Request):
             if not is_finite_number(acc) or not is_finite_number(lat) or not is_finite_number(sz):
                 v_codes.add("NON_FINITE")
             else:
-                if not (0.0 <= acc <= 1.0):
+                if not (0.0 <= acc <= 1.0) or lat < 0 or sz < 0:
                     v_codes.add("METRIC_RANGE")
-
-            if isinstance(lat, (int, float)) and not isinstance(lat, bool) and math.isfinite(lat) and lat < 0:
-                v_codes.add("METRIC_RANGE")
-
-            if isinstance(sz, (int, float)) and not isinstance(sz, bool) and math.isfinite(sz) and sz < 0:
-                v_codes.add("METRIC_RANGE")
 
             if is_finite_number(acc) and 0.0 <= acc <= 1.0:
                 if acc < accuracy_floor:
@@ -552,17 +536,16 @@ async def handle_promote(request: Request):
                         elif s_val < req_floor:
                             v_codes.add(f"SLICE_FLOOR:{req_name}")
 
-        if isinstance(v_id, str):
-            sorted_v_codes = sorted(list(v_codes), key=lambda x: x.encode("utf-8"))
-            failed_gates[v_id] = sorted_v_codes
+        sorted_v_codes = sorted(list(v_codes), key=lambda x: x.encode("utf-8"))
+        failed_gates[v_id] = sorted_v_codes
 
-            if len(v_codes) == 0:
-                valid_version_objects.append(v_item)
+        if len(v_codes) == 0:
+            valid_version_objects.append(v_item)
 
-    eligible_versions = [v["version"] for v in valid_version_objects]
+    eligible_versions = [str(v["version"]) for v in valid_version_objects]
     eligible_versions.sort(key=lambda x: x.encode("utf-8"))
 
-    champion_item = next((v for v in valid_version_objects if v["version"] == current_champion_version), None)
+    champion_item = next((v for v in valid_version_objects if str(v["version"]) == current_champion_version), None)
 
     if champion_item is None:
         return JSONResponse(status_code=200, content={
@@ -592,8 +575,8 @@ async def handle_promote(request: Request):
 
     acc_diff = round_12(challenger_acc - champion_acc)
 
-    if best_challenger["version"] != current_champion_version and acc_diff >= min_improvement:
-        new_champion_version = best_challenger["version"]
+    if str(best_challenger["version"]) != current_champion_version and acc_diff >= min_improvement:
+        new_champion_version = str(best_challenger["version"])
         ALIAS_STORE["champion"] = new_champion_version
 
         return JSONResponse(status_code=200, content={
